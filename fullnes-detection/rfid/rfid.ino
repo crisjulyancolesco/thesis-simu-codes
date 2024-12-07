@@ -2,8 +2,8 @@
 #include <Adafruit_PN532.h>
 
 // Define I2C pins for ESP32
-#define SDA_PIN 21
-#define SCL_PIN 22
+#define SDA_PIN 26
+#define SCL_PIN 17
 
 // Define LED pin
 #define LED_PIN 2
