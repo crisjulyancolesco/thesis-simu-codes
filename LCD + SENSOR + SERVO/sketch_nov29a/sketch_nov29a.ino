@@ -20,15 +20,21 @@ String AUTH_BEARER = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdX
 
 // Id of the trash can, must be specified each time new trashcan is added.
 String Trash1_red_id = "e5209cdb-7aa1-4cc0-990a-637eda6e1399"; // Replace with the actual ID
-String Trash1_green_id = "e5209cdb-7aa1-4cc0-990a-637eda6e1399";
-String Trash1_yellow_id = "e5209cdb-7aa1-4cc0-990a-637eda6e1399";
+String Trash1_green_id = "d87cf1cf-8fdc-452e-b390-0d4006efb686";
+String Trash1_yellow_id = "6a3077ee-0d78-4c7c-8fd9-a8707a1a7778";
 
-// Define pins for Ultrasonic Sensor
-#define TRIG_PIN 5
-#define ECHO_PIN 18
+// Ultrasonic Sensor Pins
+#define TRIG1 5
+#define ECHO1 18
+#define TRIG2 4
+#define ECHO2 19
+#define TRIG3 13
+#define ECHO3 14
 
 // Initialize the 20x4 I2C LCD
-LiquidCrystal_I2C lcd(0x27, 20, 4);
+LiquidCrystal_I2C lcd1(0x27, 16, 2); // Address 0x27
+LiquidCrystal_I2C lcd2(0x26, 16, 2); // Address 0x26
+LiquidCrystal_I2C lcd3(0x25, 16, 2); // Address 0x25
 
 // Define pin for Servo Motor
 #define SERVO_PIN 27
@@ -50,18 +56,16 @@ const uint8_t authorizedUIDLength = 4;
 // Threshold distance in cm
 #define DISTANCE_THRESHOLD 20
 
-int fullCount = 0;
-
 // Function to calculate distance using ultrasonic sensor
-float getDistance() {
-  digitalWrite(TRIG_PIN, LOW);
+float getDistance(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
+  digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
+  digitalWrite(trigPin, LOW);
 
-  long duration = pulseIn(ECHO_PIN, HIGH);
-  float distance = (duration * 0.034) / 2; // Convert to cm
+  long duration = pulseIn(echoPin, HIGH);
+  float distance = (duration / 2.0) * 0.0343; // Convert to cm
   return distance;
 }
 
@@ -95,16 +99,25 @@ void setup() {
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
 
-  // Initialize pins for Ultrasonic Sensor
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
+  // Initialize Ultrasonic Sensor Pins
+  pinMode(TRIG1, OUTPUT);
+  pinMode(ECHO1, INPUT);
+  pinMode(TRIG2, OUTPUT);
+  pinMode(ECHO2, INPUT);
+  pinMode(TRIG3, OUTPUT);
+  pinMode(ECHO3, INPUT);
 
-  // Initialize the LCD
-  lcd.init();
-  lcd.backlight();
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Ultrasonic Sensor");
+  // Initialize LCDs
+  lcd1.init();
+  lcd2.init();
+  lcd3.init();
+  lcd1.backlight();
+  lcd2.backlight();
+  lcd3.backlight();
+
+  lcd1.print("LCD1: OK");
+  lcd2.print("LCD2: OK");
+  lcd3.print("LCD3: OK");
 
   // Attach the Servo to the specified pin and set initial position
   servo.attach(SERVO_PIN);
@@ -243,10 +256,35 @@ bool checkRFID(const String& rfid) {
   return false;  // Default return value when WiFi is not connected or no valid response
 }
 
+// Global variables for full counts
+int fullCount1 = 0;
+int fullCount2 = 0;
+int fullCount3 = 0;
+
+bool isLocked1 = false;
+bool isLocked2 = false;
+bool isLocked3 = false;
+
 void loop() {
-  if (detectingFullness(Trash1_red_id)) {
+  if (isLocked1 && isLocked2 && isLocked3) {
+    Serial.println("All bins are locked. Stopping detection.");
+  } else {
+    checkTrashBin(Trash1_red_id, TRIG1, ECHO1, lcd1, servo, fullCount1, isLocked1);
+    checkTrashBin(Trash1_green_id, TRIG2, ECHO2, lcd2, servo, fullCount2, isLocked2);
+    checkTrashBin(Trash1_yellow_id, TRIG3, ECHO3, lcd3, servo, fullCount3, isLocked3);
+    handleNFC();
+  }
+
+  // Small delay for stability
+}
+
+void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C lcd, Servo servo, int &fullCount, bool &isLocked) {
+  Serial.println(trashId);
+
+  if (detectingFullness(trashId)) {
+    isLocked = false;
     // Get the distance
-    float distance = getDistance();
+    float distance = getDistance(trigPin, echoPin);
     float percentage;
 
     if (distance > 60) {
@@ -255,9 +293,9 @@ void loop() {
       percentage = 100;
       fullCount++;
       if (fullCount >= 5) {
-        updateToServer(Trash1_red_id, "isLocked", true, "trash_bins");
+        updateToServer(trashId, "isLocked", true, "trash_bins");
       }
-    } else if (distance <= 60 && distance >= 20) {
+    } else {
       percentage = (1 - ((distance - 20) / 40)) * 100;
     }
 
@@ -282,53 +320,84 @@ void loop() {
     Serial.print(distance);
     Serial.println(" cm");
 
-    updateToServer(Trash1_red_id, "fullness_level", percentage, "trash_bins");
+    updateToServer(trashId, "fullness_level", percentage, "trash_bins");
 
   } else {
+    isLocked = true;
     lcd.setCursor(0, 2);
     lcd.print("LOCKED: NFC REQ.");
     servo.write(35); // Lock the bin
-    // Detect NFC tag
-    uint8_t success;
-    uint8_t uid[7];
-    uint8_t uidLength;
-
-    success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
-    char uidString[50];
-
-    if (success) {
-      Serial.println("NFC tag detected!");
-
-      // Clear the string
-      uidString[0] = '\0';
-
-      // Convert the UID to a string
-      for (uint8_t i = 0; i < uidLength; i++) {
-          char buffer[6]; // Temporary buffer to hold each byte in "0xHH " format
-          sprintf(buffer, "0x%02X", uid[i]);
-          strcat(uidString, buffer); // Append to the uidString
-      }
-      Serial.print("UID: ");
-      Serial.println(uidString); // Print the UID as a single string
-
-      // Check if the detected UID matches the authorized UID
-      if (uidLength == authorizedUIDLength && checkRFID(uidString)) {
-        Serial.println("Authorized UID! Resuming detection.");
-        lcd.setCursor(0, 2);
-        lcd.clear();
-        lcd.print("UNLOCKED");
-        updateToServer(Trash1_red_id, "isLocked", false, "trash_bins");
-        fullCount = 0; // Reset full count
-        delay(500);
-      } else {
-        Serial.println("Unauthorized UID.");
-        lcd.setCursor(0, 2);
-        lcd.clear();
-        lcd.print("Unauthorized UID.");
-      }
-    }
+    handleNFC();
+    
   }
-
-  // Small delay for stability
-  delay(3000);
+  delay(3000); //Change for the delay in each bin
+  return;
 }
+
+void handleNFC() {
+  uint8_t success;
+  uint8_t uid[7];
+  uint8_t uidLength;
+
+  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 3000);
+  char uidString[50];
+
+  if (success) {
+    Serial.println("NFC tag detected!");
+
+    // Clear the string
+    uidString[0] = '\0';
+
+    // Convert the UID to a string
+    for (uint8_t i = 0; i < uidLength; i++) {
+      char buffer[6]; // Temporary buffer to hold each byte in "0xHH " format
+      sprintf(buffer, "0x%02X", uid[i]);
+      strcat(uidString, buffer); // Append to the uidString
+    }
+    Serial.print("UID: ");
+    Serial.println(uidString); // Print the UID as a single string
+
+    // Check if the detected UID matches the authorized UID
+    if (uidLength == authorizedUIDLength && checkRFID(uidString)) {
+      Serial.println("Authorized UID! Resuming detection.");
+      lcd1.setCursor(0, 2);
+      lcd1.clear();
+      lcd1.print("UNLOCKED");
+      lcd2.setCursor(0, 2);
+      lcd2.clear();
+      lcd2.print("UNLOCKED");
+      lcd3.setCursor(0, 2);
+      lcd3.clear();
+      lcd3.print("UNLOCKED");
+      
+      updateToServer(Trash1_red_id, "isLocked", false, "trash_bins");
+      updateToServer(Trash1_yellow_id, "isLocked", false, "trash_bins");
+      updateToServer(Trash1_green_id, "isLocked", false, "trash_bins");
+
+      fullCount1 = 0;
+      fullCount2 = 0;
+      fullCount3 = 0;
+
+      isLocked1 = 0;
+      isLocked2 = 0;
+      isLocked3 = 0;
+
+      delay(500);
+    } else {
+      Serial.println("Unauthorized UID.");
+      lcd1.setCursor(0, 2);
+      lcd1.clear();
+      lcd1.print("Unauthorized UID.");
+      lcd2.setCursor(0, 2);
+      lcd2.clear();
+      lcd2.print("Unauthorized UID.");
+      lcd3.setCursor(0, 2);
+      lcd3.clear();
+      lcd3.print("Unauthorized UID.");
+    }
+  } else {
+    return;
+  }
+}
+
+
