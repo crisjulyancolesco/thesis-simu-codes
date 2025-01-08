@@ -38,7 +38,7 @@ LiquidCrystal_I2C lcd3(0x25, 16, 2); // Address 0x25
 
 // Define pin for Servo Motor
 #define SERVO1_PIN 27
-#define SERVO2_PIN 32 
+#define SERVO2_PIN 32
 #define SERVO3_PIN 33
 
 // Define I2C pins for ESP32
@@ -130,10 +130,6 @@ void setup() {
   servo1.attach(SERVO1_PIN);
   servo2.attach(SERVO2_PIN);
   servo3.attach(SERVO3_PIN);
-
-  servo1.write(180);
-  servo2.write(180);
-  servo3.write(180);
 
   // Initialize PN532
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -312,6 +308,7 @@ void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C l
     isLocked = false;
 
     servo.write(180);
+    delay(1000);
 
     // Get the distance
     float distance = getDistance(trigPin, echoPin);
@@ -358,6 +355,7 @@ void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C l
     lcd.setCursor(0, 2);
     lcd.print("LOCKED: NFC REQ.");
     servo.write(0); // Lock the bin
+    delay(1000);
     handleNFC();
     
   }
@@ -390,10 +388,6 @@ void handleNFC() {
 
     // Check if the detected UID matches the authorized UID
     if (uidLength == authorizedUIDLength && checkRFID(uidString)) {
-      // servo1.write(180);
-      // servo2.write(180);
-      // servo3.write(180);
-
       Serial.println("Authorized UID! Resuming detection.");
       lcd1.setCursor(0, 2);
       lcd1.clear();
@@ -416,6 +410,8 @@ void handleNFC() {
       isLocked1 = 0;
       isLocked2 = 0;
       isLocked3 = 0;
+
+      delay(1000);
 
       delay(500);
     } else {
