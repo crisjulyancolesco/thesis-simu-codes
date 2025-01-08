@@ -13,7 +13,7 @@ LiquidCrystal_I2C lcd3(0x25, 16, 2); // Address 0x25
 #define TRIG2 4
 #define ECHO2 19
 #define TRIG3 13
-#define ECHO3 25
+#define ECHO3 14
 
 // Servo Motor Pin
 #define SERVO_PIN 27
@@ -51,8 +51,11 @@ void setup() {
 void loop() {
   // Measure distance for each sensor
   float distance1 = measureDistance(TRIG1, ECHO1);
+  delay(1000);
   float distance2 = measureDistance(TRIG2, ECHO2);
+  delay(1000);
   float distance3 = measureDistance(TRIG3, ECHO3);
+  delay(1000);
 
   // Print distances to Serial Monitor
   Serial.print("Sensor 1 Distance: ");
@@ -84,14 +87,14 @@ void loop() {
   lcd3.print(" cm  ");
 
   // Test Servo Motor
-  for (int angle = 0; angle <= 180; angle += 30) {
-    myServo.write(angle);
-    delay(500);
-  }
-  for (int angle = 180; angle >= 0; angle -= 30) {
-    myServo.write(angle);
-    delay(500);
-  }
+  // for (int angle = 0; angle <= 180; angle += 30) {
+  //   myServo.write(angle);
+  //   delay(500);
+  // }
+  // for (int angle = 180; angle >= 0; angle -= 30) {
+  //   myServo.write(angle);
+  //   delay(500);
+  // }
 
   delay(2000); // Wait before the next cycle
 }

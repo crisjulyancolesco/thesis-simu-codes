@@ -37,24 +37,31 @@ LiquidCrystal_I2C lcd2(0x26, 16, 2); // Address 0x26
 LiquidCrystal_I2C lcd3(0x25, 16, 2); // Address 0x25
 
 // Define pin for Servo Motor
-#define SERVO_PIN 27
+#define SERVO1_PIN 27
+#define SERVO2_PIN 32 
+#define SERVO3_PIN 33
 
 // Define I2C pins for ESP32
 #define SDA_PIN 21
 #define SCL_PIN 22
 
 // Create a Servo object
-Servo servo;
+Servo servo1;
+Servo servo2;
+Servo servo3;
 
 // Create the PN532 object
 Adafruit_PN532 nfc(SDA_PIN, SCL_PIN);
 
 // Define the authorized UID (pass)
-uint8_t authorizedUID[] = {0xFA, 0xD6, 0xAF, 0x80};
 const uint8_t authorizedUIDLength = 4;
 
 // Threshold distance in cm
 #define DISTANCE_THRESHOLD 20
+
+// Global variables
+int upperLimit;
+int lowerLimit;
 
 // Function to calculate distance using ultrasonic sensor
 float getDistance(int trigPin, int echoPin) {
@@ -120,8 +127,13 @@ void setup() {
   lcd3.print("LCD3: OK");
 
   // Attach the Servo to the specified pin and set initial position
-  servo.attach(SERVO_PIN);
-  servo.write(90); // Neutral position
+  servo1.attach(SERVO1_PIN);
+  servo2.attach(SERVO2_PIN);
+  servo3.attach(SERVO3_PIN);
+
+  servo1.write(180);
+  servo2.write(180);
+  servo3.write(180);
 
   // Initialize PN532
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -208,26 +220,41 @@ DynamicJsonDocument processResponse(const String& payload) {
 
 bool detectingFullness(const String& id) {
   if (WiFi.status() == WL_CONNECTED) {
-    // Specify the ID and column to fetch
-    String column = "isLocked";
+    // Specify the ID and columns to fetch
+    String columns = "isLocked,upper_limit,lower_limit";
 
-    String response = fetchHttpResponse("id",id, column, "trash_bins");  // Assuming this fetches the HTTP response correctly
+    // Fetch the HTTP response for the specified ID and columns
+    String response = fetchHttpResponse("id", id, columns, "trash_bins");  // Assuming this fetches the HTTP response correctly
     DynamicJsonDocument doc = processResponse(response);  // Assuming this processes the response correctly
 
-    // Example: Extract and use data from the response
-    if (!doc.isNull() && doc.size() > 0 && doc[0].containsKey(column)) {
-      bool lockStatus = doc[0][column];  // Now lockStatus is boolean
-      Serial.print("Locked Status: ");
-      Serial.println(lockStatus ? "true" : "false");
-      return !lockStatus;  // Return boolean value
+    // Extract and use data from the response
+    if (!doc.isNull() && doc.size() > 0) {
+      if (doc[0].containsKey("isLocked") && doc[0].containsKey("upper_limit") && doc[0].containsKey("lower_limit")) {
+        // Update global variables
+        bool lockStatus = doc[0]["isLocked"]; 
+        upperLimit = doc[0]["upper_limit"];  // Assign integer value
+        lowerLimit = doc[0]["lower_limit"];  // Assign integer value
+
+        // Debugging output
+        Serial.print("Locked Status: ");
+        Serial.println(lockStatus ? "true" : "false");
+        Serial.print("Upper Limit: ");
+        Serial.println(upperLimit);
+        Serial.print("Lower Limit: ");
+        Serial.println(lowerLimit);
+
+        // Return inverse of isLocked
+        return !lockStatus;
+      } else {
+        Serial.println("Error: Columns not found or invalid response");
+      }
     } else {
-      Serial.println("Error: Column not found or invalid response");
+      Serial.println("Error: Invalid JSON response");
     }
   } else {
     Serial.println("Error in WiFi connection");
   }
-
-  return false;  // Default return value when WiFi is not connected or no valid response
+  return true;  // Default return value in case of error
 }
 
 // Function to find the RFID in the database
@@ -268,35 +295,40 @@ bool isLocked3 = false;
 void loop() {
   if (isLocked1 && isLocked2 && isLocked3) {
     Serial.println("All bins are locked. Stopping detection.");
+    handleNFC();
   } else {
-    checkTrashBin(Trash1_red_id, TRIG1, ECHO1, lcd1, servo, fullCount1, isLocked1);
-    checkTrashBin(Trash1_green_id, TRIG2, ECHO2, lcd2, servo, fullCount2, isLocked2);
-    checkTrashBin(Trash1_yellow_id, TRIG3, ECHO3, lcd3, servo, fullCount3, isLocked3);
+    Serial.print("Red Trash");
+    checkTrashBin(Trash1_red_id, TRIG1, ECHO1, lcd1, servo1, fullCount1, isLocked1);
+    Serial.print("Green Trash");
+    checkTrashBin(Trash1_green_id, TRIG2, ECHO2, lcd2, servo2, fullCount2, isLocked2);
+    Serial.print("Yellow Trash");
+    checkTrashBin(Trash1_yellow_id, TRIG3, ECHO3, lcd3, servo3, fullCount3, isLocked3);
     handleNFC();
   }
-
-  // Small delay for stability
 }
 
 void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C lcd, Servo servo, int &fullCount, bool &isLocked) {
-  Serial.println(trashId);
-
   if (detectingFullness(trashId)) {
     isLocked = false;
+
+    servo.write(180);
+
     // Get the distance
     float distance = getDistance(trigPin, echoPin);
     float percentage;
 
-    if (distance > 60) {
+    if (distance > upperLimit) {
       percentage = 0;
-    } else if (distance < 20) {
+      fullCount = 0;
+    } else if (distance < lowerLimit) {
       percentage = 100;
       fullCount++;
       if (fullCount >= 5) {
         updateToServer(trashId, "isLocked", true, "trash_bins");
       }
     } else {
-      percentage = (1 - ((distance - 20) / 40)) * 100;
+      percentage = (1 - ((distance - lowerLimit) / (upperLimit - lowerLimit))) * 100;
+      fullCount = 0;
     }
 
     // Display the fullness level on the LCD
@@ -312,7 +344,6 @@ void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C l
       lcd.print("FULL               ");
     } else {
       lcd.print("                   ");
-      servo.write(145); // Unlock the bin
     }
 
     // Print to Serial Monitor for debugging
@@ -326,11 +357,11 @@ void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C l
     isLocked = true;
     lcd.setCursor(0, 2);
     lcd.print("LOCKED: NFC REQ.");
-    servo.write(35); // Lock the bin
+    servo.write(0); // Lock the bin
     handleNFC();
     
   }
-  delay(3000); //Change for the delay in each bin
+  delay(500); //Change for the delay in each bin
   return;
 }
 
@@ -359,6 +390,10 @@ void handleNFC() {
 
     // Check if the detected UID matches the authorized UID
     if (uidLength == authorizedUIDLength && checkRFID(uidString)) {
+      // servo1.write(180);
+      // servo2.write(180);
+      // servo3.write(180);
+
       Serial.println("Authorized UID! Resuming detection.");
       lcd1.setCursor(0, 2);
       lcd1.clear();
