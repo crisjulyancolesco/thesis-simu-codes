@@ -8,10 +8,17 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
-const char* ssid = "OnePlus 10 Pro 5G";
-const char* password = "A123456789";
-unsigned long startAttemptTime = 0;
-unsigned long connectionTimeout = 5000; // 30 seconds timeout for Wi-Fi connection
+// For Local Storage
+#include <Preferences.h>
+
+Preferences preferences;
+
+// Default Wi-Fi credentials
+const char *defaultSSID = "OnePlus 10 Pro 5G";
+const char *defaultPassword = "A123456789";
+
+// 30 seconds timeout for Wi-Fi connection
+unsigned long connectionTimeout = 5000;
 
 // Supabase API information
 String API_URL = "https://bqpbvkwmgllnlufoszdd.supabase.co/rest/v1";
@@ -19,9 +26,9 @@ String API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsI
 String AUTH_BEARER = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJxcGJ2a3dtZ2xsbmx1Zm9zemRkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTczMjk0OTAxOSwiZXhwIjoyMDQ4NTI1MDE5fQ.jQrnieDZlwDwPNnT2yM3U3LzLmLHjSGTHNmjoH608fE";
 
 // Id of the trash can, must be specified each time new trashcan is added.
-String Trash1_red_id = "e5209cdb-7aa1-4cc0-990a-637eda6e1399"; // Replace with the actual ID
-String Trash1_green_id = "d87cf1cf-8fdc-452e-b390-0d4006efb686";
-String Trash1_yellow_id = "6a3077ee-0d78-4c7c-8fd9-a8707a1a7778";
+String Trash1_red_id = "5dc06acd-638d-44f8-88d5-bb57f9643a12"; // Replace with the actual ID
+String Trash1_green_id = "69d77faa-f302-4236-aca1-772afa94efee";
+String Trash1_yellow_id = "93df8b18-5005-4e20-9c22-615d2f6b3d48";
 
 // Ultrasonic Sensor Pins
 #define TRIG1 5
@@ -80,22 +87,81 @@ void setup() {
   // Initialize Serial Monitor
   Serial.begin(115200);
 
+  // Attach the Servo to the specified pin and set initial position
+  servo1.attach(SERVO1_PIN);
+  servo2.attach(SERVO2_PIN);
+  servo3.attach(SERVO3_PIN);
+
+  servo1.write(180);
+  servo2.write(180);
+  servo3.write(180);
+
+  preferences.begin("WiFiCreds", true);
+
+  // Fetch to local Storage
+  String savedSSID = preferences.getString("ssid", "");
+  String savedPassword = preferences.getString("password", "");
+
+  preferences.end();
+
+  // Wi-Fi Connection attempt counter
+  int connectionAttempts = 0;
+  int defaultAttempts = 0;
+
   // Wifi Connection
   Serial.print("Connecting to ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
+  Serial.println(savedSSID);
 
-  startAttemptTime = millis();
-  
-  while (WiFi.status() != WL_CONNECTED) {
+  unsigned long startAttemptTime = millis();
+
+  // Try to connect with the saved Credentials for 5 attempts
+  while (WiFi.status() != WL_CONNECTED && connectionAttempts < 5) {
+    WiFi.begin(savedSSID, savedPassword);
     delay(500);
     Serial.print(".");
     
-    // Check if the connection attempt has timed out
+    if (WiFi.status() == WL_CONNECTED) {
+      break;
+    }
+
     if (millis() - startAttemptTime >= connectionTimeout) {
-      Serial.println("Failed to connect to Wi-Fi.");
-      Serial.println("Restarting...");
+      Serial.println("\nFailed to connect. Retrying...");
+      connectionAttempts++;
+      startAttemptTime = millis();
+      delay(1000);
+    }
+  }
+
+  if (WiFi.status() != WL_CONNECTED && connectionAttempts >= 5) {
+    Serial.println("\nMax connection attempts with saved credentials reached. Switching to default credentials.");
+
+    // Reset the connection attempt counter
+    connectionAttempts = 0;
+    startAttemptTime = millis();
+
+    // Try connecting with default credentials up to 3 attempts
+    while (WiFi.status() != WL_CONNECTED && defaultAttempts < 3) {
+      WiFi.begin(defaultSSID, defaultPassword);
+      delay(500);
+      Serial.print(".");
       
+      if (WiFi.status() == WL_CONNECTED) {
+        break;
+      }
+
+      if (millis() - startAttemptTime >= connectionTimeout) {
+        Serial.println("\nFailed to connect with default credentials. Retrying...");
+        defaultAttempts++;
+        startAttemptTime = millis();
+        delay(1000);
+      }
+    }
+
+    // If still not connected after 3 attempts, restart the ESP32
+    if (WiFi.status() != WL_CONNECTED && defaultAttempts >= 3) {
+      Serial.println("\nFailed to connect to Wi-Fi after multiple attempts.");
+      Serial.println("Restarting...");
+
       // Restart the ESP32
       ESP.restart();
     }
@@ -126,11 +192,6 @@ void setup() {
   lcd2.print("LCD2: OK");
   lcd3.print("LCD3: OK");
 
-  // Attach the Servo to the specified pin and set initial position
-  servo1.attach(SERVO1_PIN);
-  servo2.attach(SERVO2_PIN);
-  servo3.attach(SERVO3_PIN);
-
   // Initialize PN532
   Wire.begin(SDA_PIN, SCL_PIN);
   nfc.begin();
@@ -145,6 +206,10 @@ void setup() {
 
 // Function to Fetch a specific table from trash_bins table from DB
 String fetchHttpResponse(const String& filterKey, const String& filterValue, const String& column, const String& table) {
+  if (WiFi.status() != WL_CONNECTED) {
+    reconnectWiFi();
+  }
+
   HTTPClient http;
 
   // Construct API URL with query parameters for filtering and selecting a specific column
@@ -169,6 +234,10 @@ String fetchHttpResponse(const String& filterKey, const String& filterValue, con
 
 // Function to PATCH the fullness level to the DB
 bool updateToServer(const String& id, const String& column, int value, const String& table) {
+  if (WiFi.status() != WL_CONNECTED) {
+    reconnectWiFi();
+  }
+
   HTTPClient http;
 
   // Construct the query URL with the ID
@@ -198,6 +267,45 @@ bool updateToServer(const String& id, const String& column, int value, const Str
   }
 }
 
+// Create data to the server
+bool createToServer(const String& binId, int fillLevel, bool isFull, const String& table) {
+  if (WiFi.status() != WL_CONNECTED) {
+    reconnectWiFi();
+  }
+
+  HTTPClient http;
+
+  // Construct the query URL
+  String queryUrl = API_URL + "/" + table;
+
+  // Initialize the HTTP request
+  http.begin(queryUrl);
+  http.addHeader("apikey", API_KEY);
+  http.addHeader("Authorization", AUTH_BEARER);
+  http.addHeader("Content-Type", "application/json");
+
+  // Construct JSON payload with bin_id, fill_level, and isFull
+  String jsonPayload = "{";
+  jsonPayload += "\"bin_id\": \"" + binId + "\",";
+  jsonPayload += "\"fill_level\": " + String(fillLevel) + ",";
+  jsonPayload += "\"isFull\": " + String(isFull ? "true" : "false");
+  jsonPayload += "}";
+
+  // Send the INSERT request to create a new record
+  int httpCode = http.POST(jsonPayload);  // Send POST request
+  if (httpCode == 201) {  // 201 Created
+    Serial.println("Record creation successful");
+    http.end();
+    return true;
+  } else {
+    Serial.print("Error in HTTP request: ");
+    Serial.println(httpCode);
+    http.end();
+    return false;
+  }
+}
+
+
 // Function to destructure results from requests
 DynamicJsonDocument processResponse(const String& payload) {
   DynamicJsonDocument doc(1024);
@@ -217,10 +325,10 @@ DynamicJsonDocument processResponse(const String& payload) {
 bool detectingFullness(const String& id) {
   if (WiFi.status() == WL_CONNECTED) {
     // Specify the ID and columns to fetch
-    String columns = "isLocked,upper_limit,lower_limit";
+    String columns = "isLocked,upper_limit,lower_limit,ssid,password";
 
     // Fetch the HTTP response for the specified ID and columns
-    String response = fetchHttpResponse("id", id, columns, "trash_bins");  // Assuming this fetches the HTTP response correctly
+    String response = fetchHttpResponse("id", id, columns, "bins");  // Assuming this fetches the HTTP response correctly
     DynamicJsonDocument doc = processResponse(response);  // Assuming this processes the response correctly
 
     // Extract and use data from the response
@@ -230,6 +338,29 @@ bool detectingFullness(const String& id) {
         bool lockStatus = doc[0]["isLocked"]; 
         upperLimit = doc[0]["upper_limit"];  // Assign integer value
         lowerLimit = doc[0]["lower_limit"];  // Assign integer value
+
+        if (doc[0]["ssid"] && doc[0]["password"]) {
+          const char *ssid = doc[0]["ssid"];
+          const char *password = doc[0]["password"];
+
+          preferences.begin("WiFiCreds", false);
+
+          // Check if SSID or password is different from the stored value
+          String storedSSID = preferences.getString("ssid", "");
+          String storedPassword = preferences.getString("password", "");
+
+          if (ssid != storedSSID) {
+            preferences.putString("ssid", ssid);
+            Serial.println("New SSID Saved");
+          }
+
+          if (password != storedPassword) {
+            preferences.putString("password", password);
+            Serial.println("New Password Saved");
+          }
+
+          preferences.end();
+        }
 
         // Debugging output
         Serial.print("Locked Status: ");
@@ -249,6 +380,7 @@ bool detectingFullness(const String& id) {
     }
   } else {
     Serial.println("Error in WiFi connection");
+    reconnectWiFi();
   }
   return true;  // Default return value in case of error
 }
@@ -274,6 +406,7 @@ bool checkRFID(const String& rfid) {
     }
   } else {
     Serial.println("Error in WiFi connection.");
+    reconnectWiFi();
   }
 
   return false;  // Default return value when WiFi is not connected or no valid response
@@ -303,7 +436,7 @@ void loop() {
   }
 }
 
-void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C lcd, Servo servo, int &fullCount, bool &isLocked) {
+void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C lcd, Servo &servo, int &fullCount, bool &isLocked) {
   if (detectingFullness(trashId)) {
     isLocked = false;
 
@@ -321,7 +454,7 @@ void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C l
       percentage = 100;
       fullCount++;
       if (fullCount >= 5) {
-        updateToServer(trashId, "isLocked", true, "trash_bins");
+        createToServer(trashId, 100, true, "sensor_history");
       }
     } else {
       percentage = (1 - ((distance - lowerLimit) / (upperLimit - lowerLimit))) * 100;
@@ -348,7 +481,7 @@ void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C l
     Serial.print(distance);
     Serial.println(" cm");
 
-    updateToServer(trashId, "fullness_level", percentage, "trash_bins");
+    createToServer(trashId, percentage, false, "sensor_history");
 
   } else {
     isLocked = true;
@@ -399,9 +532,9 @@ void handleNFC() {
       lcd3.clear();
       lcd3.print("UNLOCKED");
       
-      updateToServer(Trash1_red_id, "isLocked", false, "trash_bins");
-      updateToServer(Trash1_yellow_id, "isLocked", false, "trash_bins");
-      updateToServer(Trash1_green_id, "isLocked", false, "trash_bins");
+      updateToServer(Trash1_red_id, "isLocked", false, "bins");
+      updateToServer(Trash1_yellow_id, "isLocked", false, "bins");
+      updateToServer(Trash1_green_id, "isLocked", false, "bins");
 
       fullCount1 = 0;
       fullCount2 = 0;
@@ -410,8 +543,6 @@ void handleNFC() {
       isLocked1 = 0;
       isLocked2 = 0;
       isLocked3 = 0;
-
-      delay(1000);
 
       delay(500);
     } else {
@@ -428,6 +559,32 @@ void handleNFC() {
     }
   } else {
     return;
+  }
+}
+
+void reconnectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return; 
+  }
+
+  int attemptCount = 0;
+
+  // Try to reconnect up to 5 times
+  while (WiFi.status() != WL_CONNECTED && attemptCount < 5) {
+    WiFi.reconnect();
+    delay(5000);
+    attemptCount++;
+    Serial.print("Attempt ");
+    Serial.print(attemptCount);
+    Serial.println(" of 5");
+  }
+
+  // If still not connected after 5 attempts, restart the ESP32
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Failed to reconnect after 5 attempts. Restarting...");
+    ESP.restart();
+  } else {
+    Serial.println("Reconnected to WiFi!");
   }
 }
 
