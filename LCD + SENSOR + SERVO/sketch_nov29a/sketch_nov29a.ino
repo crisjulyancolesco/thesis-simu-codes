@@ -27,21 +27,21 @@ String AUTH_BEARER = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdX
 
 // Id of the trash can, must be specified each time new trashcan is added.
 String Trash1_red_id = "5dc06acd-638d-44f8-88d5-bb57f9643a12"; // Replace with the actual ID
-String Trash1_green_id = "69d77faa-f302-4236-aca1-772afa94efee";
 String Trash1_yellow_id = "93df8b18-5005-4e20-9c22-615d2f6b3d48";
+String Trash1_green_id = "69d77faa-f302-4236-aca1-772afa94efee";
 
 // Ultrasonic Sensor Pins
-#define TRIG1 5
-#define ECHO1 18
+#define TRIG1 13
+#define ECHO1 14
 #define TRIG2 4
 #define ECHO2 19
-#define TRIG3 13
-#define ECHO3 14
+#define TRIG3 5
+#define ECHO3 18
 
 // Initialize the 20x4 I2C LCD
-LiquidCrystal_I2C lcd1(0x27, 16, 2); // Address 0x27
-LiquidCrystal_I2C lcd2(0x26, 16, 2); // Address 0x26
-LiquidCrystal_I2C lcd3(0x25, 16, 2); // Address 0x25
+LiquidCrystal_I2C lcd1(0x25, 16, 2); // Address 0x25
+LiquidCrystal_I2C lcd3(0x26, 16, 2); // Address 0x26
+LiquidCrystal_I2C lcd2(0x27, 16, 2); // Address 0x27
 
 // Define pin for Servo Motor
 #define SERVO1_PIN 27
@@ -288,7 +288,7 @@ bool createToServer(const String& binId, int fillLevel, bool isFull, const Strin
   String jsonPayload = "{";
   jsonPayload += "\"bin_id\": \"" + binId + "\",";
   jsonPayload += "\"fill_level\": " + String(fillLevel) + ",";
-  jsonPayload += "\"isFull\": " + String(isFull ? "true" : "false");
+  jsonPayload += "\"is_full\": " + String(isFull ? "true" : "false");
   jsonPayload += "}";
 
   // Send the INSERT request to create a new record
@@ -325,7 +325,7 @@ DynamicJsonDocument processResponse(const String& payload) {
 bool detectingFullness(const String& id) {
   if (WiFi.status() == WL_CONNECTED) {
     // Specify the ID and columns to fetch
-    String columns = "isLocked,upper_limit,lower_limit,ssid,password";
+    String columns = "is_locked,upper_limit,lower_limit,ssid,password";
 
     // Fetch the HTTP response for the specified ID and columns
     String response = fetchHttpResponse("id", id, columns, "bins");  // Assuming this fetches the HTTP response correctly
@@ -333,9 +333,9 @@ bool detectingFullness(const String& id) {
 
     // Extract and use data from the response
     if (!doc.isNull() && doc.size() > 0) {
-      if (doc[0].containsKey("isLocked") && doc[0].containsKey("upper_limit") && doc[0].containsKey("lower_limit")) {
+      if (doc[0].containsKey("is_locked") && doc[0].containsKey("upper_limit") && doc[0].containsKey("lower_limit")) {
         // Update global variables
-        bool lockStatus = doc[0]["isLocked"]; 
+        bool lockStatus = doc[0]["is_locked"]; 
         upperLimit = doc[0]["upper_limit"];  // Assign integer value
         lowerLimit = doc[0]["lower_limit"];  // Assign integer value
 
@@ -421,19 +421,28 @@ bool isLocked1 = false;
 bool isLocked2 = false;
 bool isLocked3 = false;
 
+bool justUnlock = false;
+
+unsigned long previousCheckTime = 0; // Last time trash bins were checked
+const unsigned long checkInterval = 1 * 60 * 1000;
+
 void loop() {
+  unsigned long currentTime = millis();
+
   if (isLocked1 && isLocked2 && isLocked3) {
     Serial.println("All bins are locked. Stopping detection.");
-    handleNFC();
   } else {
-    Serial.print("Red Trash");
-    checkTrashBin(Trash1_red_id, TRIG1, ECHO1, lcd1, servo1, fullCount1, isLocked1);
-    Serial.print("Green Trash");
-    checkTrashBin(Trash1_green_id, TRIG2, ECHO2, lcd2, servo2, fullCount2, isLocked2);
-    Serial.print("Yellow Trash");
-    checkTrashBin(Trash1_yellow_id, TRIG3, ECHO3, lcd3, servo3, fullCount3, isLocked3);
-    handleNFC();
+    if (currentTime - previousCheckTime >= checkInterval || previousCheckTime == 0 || justUnlock) {
+      previousCheckTime = currentTime; // Update the last check time
+
+      Serial.println("Checking trash bins...");
+      checkTrashBin(Trash1_red_id, TRIG1, ECHO1, lcd1, servo1, fullCount1, isLocked1);
+      checkTrashBin(Trash1_yellow_id, TRIG2, ECHO2, lcd2, servo2, fullCount2, isLocked2);
+      checkTrashBin(Trash1_green_id, TRIG3, ECHO3, lcd3, servo3, fullCount3, isLocked3);
+      justUnlock = false;
+    }
   }
+  handleNFC();
 }
 
 void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C lcd, Servo &servo, int &fullCount, bool &isLocked) {
@@ -501,8 +510,16 @@ void handleNFC() {
   uint8_t uid[7];
   uint8_t uidLength;
 
-  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 3000);
+  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 5000);
   char uidString[50];
+
+  lcd1.setCursor(0, 2);
+  lcd1.print("LOCKED: NFC REQ.");
+  lcd2.setCursor(0, 2);
+  lcd2.print("LOCKED: NFC REQ.");
+  lcd3.setCursor(0, 2);
+  lcd3.print("LOCKED: NFC REQ.");
+  delay(1000);
 
   if (success) {
     Serial.println("NFC tag detected!");
@@ -532,9 +549,9 @@ void handleNFC() {
       lcd3.clear();
       lcd3.print("UNLOCKED");
       
-      updateToServer(Trash1_red_id, "isLocked", false, "bins");
-      updateToServer(Trash1_yellow_id, "isLocked", false, "bins");
-      updateToServer(Trash1_green_id, "isLocked", false, "bins");
+      updateToServer(Trash1_red_id, "is_locked", false, "bins");
+      updateToServer(Trash1_yellow_id, "is_locked", false, "bins");
+      updateToServer(Trash1_green_id, "is_locked", false, "bins");
 
       fullCount1 = 0;
       fullCount2 = 0;
@@ -543,6 +560,8 @@ void handleNFC() {
       isLocked1 = 0;
       isLocked2 = 0;
       isLocked3 = 0;
+
+      justUnlock = true;
 
       delay(500);
     } else {
