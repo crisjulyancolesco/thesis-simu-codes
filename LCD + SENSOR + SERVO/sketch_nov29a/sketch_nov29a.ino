@@ -11,6 +11,9 @@
 // For Local Storage
 #include <Preferences.h>
 
+// For the time of Flight Sensor
+#include <Adafruit_VL53L0X.h>
+
 Preferences preferences;
 
 // Default Wi-Fi credentials
@@ -30,18 +33,26 @@ String Trash1_red_id = "5dc06acd-638d-44f8-88d5-bb57f9643a12"; // Replace with t
 String Trash1_yellow_id = "93df8b18-5005-4e20-9c22-615d2f6b3d48";
 String Trash1_green_id = "69d77faa-f302-4236-aca1-772afa94efee";
 
-// Ultrasonic Sensor Pins
-#define TRIG1 13
-#define ECHO1 14
-#define TRIG2 4
-#define ECHO2 19
-#define TRIG3 5
-#define ECHO3 18
-
 // Initialize the 20x4 I2C LCD
-LiquidCrystal_I2C lcd1(0x25, 16, 2); // Address 0x25
+LiquidCrystal_I2C lcd1(0x27, 16, 2); // Address 0x25
 LiquidCrystal_I2C lcd3(0x26, 16, 2); // Address 0x26
-LiquidCrystal_I2C lcd2(0x27, 16, 2); // Address 0x27
+LiquidCrystal_I2C lcd2(0x25, 16, 2); // Address 0x27
+
+// Create instances for each VL53L0X sensor
+Adafruit_VL53L0X lox1 = Adafruit_VL53L0X();
+Adafruit_VL53L0X lox2 = Adafruit_VL53L0X();
+Adafruit_VL53L0X lox3 = Adafruit_VL53L0X();
+
+// X Shut Pins
+#define XSHUT_PIN_1 12
+#define XSHUT_PIN_2 13
+#define XSHUT_PIN_3 16  
+
+// Address of ToF
+#define LOX1_ADDRESS 0x30
+#define LOX2_ADDRESS 0x31
+#define LOX3_ADDRESS 0x32
+
 
 // Define pin for Servo Motor
 #define SERVO1_PIN 27
@@ -63,29 +74,103 @@ Adafruit_PN532 nfc(SDA_PIN, SCL_PIN);
 // Define the authorized UID (pass)
 const uint8_t authorizedUIDLength = 4;
 
-// Threshold distance in cm
-#define DISTANCE_THRESHOLD 20
-
 // Global variables
 int upperLimit;
 int lowerLimit;
 
-// Function to calculate distance using ultrasonic sensor
-float getDistance(int trigPin, int echoPin) {
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
+// Function to measure distance from a VL53L0X sensor
+float getDistance(Adafruit_VL53L0X &lox) {
+  VL53L0X_RangingMeasurementData_t measure;
+  lox.rangingTest(&measure, false);
 
-  long duration = pulseIn(echoPin, HIGH);
-  float distance = (duration / 2.0) * 0.0343; // Convert to cm
-  return distance;
+  if (measure.RangeStatus != 4) { // If valid reading
+    return measure.RangeMilliMeter / 10.0; // Convert to cm
+  } else {
+    return -1; // Out of range
+  }
+}
+
+bool initializeSensor(Adafruit_VL53L0X &sensor, uint8_t address, const char* sensorName) {
+  int attempts = 0;
+  while (attempts < 5) {
+    if (sensor.begin(address)) {
+      Serial.print(sensorName);
+      Serial.println(" initialized.");
+      return true;
+    }
+    Serial.print("Failed to initialize ");
+    Serial.print(sensorName);
+    Serial.println(". Retrying...");
+    attempts++;
+    delay(1000); // Wait before retrying
+  }
+  return false; // Failed after 5 attempts
+}
+
+// Sets The Id for the ToF Sensors
+void setID() {
+  // Reset all sensors
+  digitalWrite(XSHUT_PIN_1, LOW);
+  digitalWrite(XSHUT_PIN_2, LOW);
+  digitalWrite(XSHUT_PIN_3, LOW);
+  delay(10);
+
+  // Initialize sensor 1
+  digitalWrite(XSHUT_PIN_1, HIGH);
+  delay(10);
+  if (!initializeSensor(lox1, LOX1_ADDRESS, "Sensor 1")) {
+    Serial.println("Sensor 1 failed after 5 attempts. Restarting...");
+    ESP.restart(); // Restart the ESP32 if sensor fails to initialize
+  }
+
+  // Initialize sensor 2
+  digitalWrite(XSHUT_PIN_2, HIGH);
+  delay(10);
+  if (!initializeSensor(lox2, LOX2_ADDRESS, "Sensor 2")) {
+    Serial.println("Sensor 2 failed after 5 attempts. Restarting...");
+    ESP.restart(); // Restart the ESP32 if sensor fails to initialize
+  }
+
+  // Initialize sensor 3
+  digitalWrite(XSHUT_PIN_3, HIGH);
+  delay(10);
+  if (!initializeSensor(lox3, LOX3_ADDRESS, "Sensor 3")) {
+    Serial.println("Sensor 3 failed after 5 attempts. Restarting...");
+    ESP.restart(); // Restart the ESP32 if sensor fails to initialize
+  }
 }
 
 void setup() {
   // Initialize Serial Monitor
   Serial.begin(115200);
+
+  pinMode(XSHUT_PIN_1, OUTPUT);
+  pinMode(XSHUT_PIN_2, OUTPUT);
+  pinMode(XSHUT_PIN_3, OUTPUT);
+
+  Serial.println(F("VL53L0X Shutdown pins inited..."));
+
+  digitalWrite(XSHUT_PIN_1, LOW);
+  digitalWrite(XSHUT_PIN_2, LOW);
+  digitalWrite(XSHUT_PIN_3, LOW);
+
+  delay(100);
+
+  digitalWrite(XSHUT_PIN_1, HIGH);
+  digitalWrite(XSHUT_PIN_2, HIGH);
+  digitalWrite(XSHUT_PIN_3, HIGH);
+
+  delay(100);
+
+  digitalWrite(XSHUT_PIN_1, LOW);
+  digitalWrite(XSHUT_PIN_2, LOW);
+  digitalWrite(XSHUT_PIN_3, LOW);
+
+  Serial.println(F("VL53L0X Both in reset mode...(pins are low)"));
+  
+  
+  Serial.println(F("VL53L0X Starting..."));
+  setID();
 
   // Attach the Servo to the specified pin and set initial position
   servo1.attach(SERVO1_PIN);
@@ -172,14 +257,6 @@ void setup() {
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
 
-  // Initialize Ultrasonic Sensor Pins
-  pinMode(TRIG1, OUTPUT);
-  pinMode(ECHO1, INPUT);
-  pinMode(TRIG2, OUTPUT);
-  pinMode(ECHO2, INPUT);
-  pinMode(TRIG3, OUTPUT);
-  pinMode(ECHO3, INPUT);
-
   // Initialize LCDs
   lcd1.init();
   lcd2.init();
@@ -202,6 +279,22 @@ void setup() {
   }
   nfc.SAMConfig(); // Configure PN532 to read NFC tags
   Serial.println("Waiting for an NFC tag...");
+
+  //Initialize each VL53L0X sensor
+  if (!lox1.begin(0x30)) { // Set custom I2C address for lox1
+    Serial.println("Failed to initialize VL53L0X sensor 1!");
+    while (1);
+  }
+
+  if (!lox2.begin(0x31)) { // Set custom I2C address for lox2
+    Serial.println("Failed to initialize VL53L0X sensor 2!");
+    while (1);
+  }
+
+  if (!lox3.begin(0x32)) { // Set custom I2C address for lox3
+    Serial.println("Failed to initialize VL53L0X sensor 3!");
+    while (1);
+  }
 }
 
 // Function to Fetch a specific table from trash_bins table from DB
@@ -424,7 +517,7 @@ bool isLocked3 = false;
 bool justUnlock = false;
 
 unsigned long previousCheckTime = 0; // Last time trash bins were checked
-const unsigned long checkInterval = 1 * 60 * 1000;
+const unsigned long checkInterval = 45 * 60 * 1000;
 
 void loop() {
   unsigned long currentTime = millis();
@@ -436,38 +529,52 @@ void loop() {
       previousCheckTime = currentTime; // Update the last check time
 
       Serial.println("Checking trash bins...");
-      checkTrashBin(Trash1_red_id, TRIG1, ECHO1, lcd1, servo1, fullCount1, isLocked1);
-      checkTrashBin(Trash1_yellow_id, TRIG2, ECHO2, lcd2, servo2, fullCount2, isLocked2);
-      checkTrashBin(Trash1_green_id, TRIG3, ECHO3, lcd3, servo3, fullCount3, isLocked3);
+      checkTrashBin(Trash1_red_id, lox1, lcd1, servo1, fullCount1, isLocked1);
+      checkTrashBin(Trash1_yellow_id, lox2, lcd2, servo2, fullCount2, isLocked2);
+      checkTrashBin(Trash1_green_id, lox3, lcd3, servo3, fullCount3, isLocked3);
       justUnlock = false;
     }
   }
   handleNFC();
 }
 
-void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C lcd, Servo &servo, int &fullCount, bool &isLocked) {
+
+void checkTrashBin(String trashId, Adafruit_VL53L0X &tofSensor, LiquidCrystal_I2C lcd, Servo &servo, int &fullCount, bool &isLocked) {
   if (detectingFullness(trashId)) {
     isLocked = false;
 
+    // Unlock the trash bin by rotating the servo
     servo.write(180);
     delay(1000);
 
-    // Get the distance
-    float distance = getDistance(trigPin, echoPin);
+    // Get the distance from the ToF sensor
+    float distance = getDistance(tofSensor);
     float percentage;
+
+    if (distance == -1) {
+      // If distance reading is invalid
+      lcd.setCursor(0, 0);
+      lcd.print("Sensor Error!     ");
+    }
 
     if (distance > upperLimit) {
       percentage = 0;
       fullCount = 0;
+      lcd.setCursor(0, 2);
+      lcd.print("                   ");
     } else if (distance < lowerLimit) {
       percentage = 100;
       fullCount++;
-      if (fullCount >= 5) {
+      if (fullCount >= 3) {
+        lcd.setCursor(0, 2);
+        lcd.print("FULL               ");
         createToServer(trashId, 100, true, "sensor_history");
       }
     } else {
       percentage = (1 - ((distance - lowerLimit) / (upperLimit - lowerLimit))) * 100;
       fullCount = 0;
+      lcd.setCursor(0, 2);
+      lcd.print("                   ");
     }
 
     // Display the fullness level on the LCD
@@ -477,19 +584,15 @@ void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C l
     lcd.print(percentage);
     lcd.print(" %     ");
 
-    // Check if the distance is less than the threshold and control the servo
-    lcd.setCursor(0, 2);
-    if (distance < DISTANCE_THRESHOLD) {
-      lcd.print("FULL               ");
-    } else {
-      lcd.print("                   ");
-    }
-
     // Print to Serial Monitor for debugging
+    Serial.print("Percentage: ");
+    Serial.print(percentage);
+    Serial.println(" %");
     Serial.print("Distance: ");
     Serial.print(distance);
     Serial.println(" cm");
 
+    // Send the data to the server
     createToServer(trashId, percentage, false, "sensor_history");
 
   } else {
@@ -499,11 +602,11 @@ void checkTrashBin(String trashId, int trigPin, int echoPin, LiquidCrystal_I2C l
     servo.write(0); // Lock the bin
     delay(1000);
     handleNFC();
-    
   }
-  delay(500); //Change for the delay in each bin
-  return;
+
+  delay(500); // Adjust for delay in each bin
 }
+
 
 void handleNFC() {
   uint8_t success;
@@ -512,14 +615,6 @@ void handleNFC() {
 
   success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 5000);
   char uidString[50];
-
-  lcd1.setCursor(0, 2);
-  lcd1.print("LOCKED: NFC REQ.");
-  lcd2.setCursor(0, 2);
-  lcd2.print("LOCKED: NFC REQ.");
-  lcd3.setCursor(0, 2);
-  lcd3.print("LOCKED: NFC REQ.");
-  delay(1000);
 
   if (success) {
     Serial.println("NFC tag detected!");
