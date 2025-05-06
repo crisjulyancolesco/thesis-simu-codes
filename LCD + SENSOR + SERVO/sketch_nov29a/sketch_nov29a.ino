@@ -14,14 +14,24 @@
 // For the time of Flight Sensor
 #include <Adafruit_VL53L0X.h>
 
+// For Sleep
+#include "esp_sleep.h"
+
+// For temperature Sensor   
+#include "DHT.h"
+
 Preferences preferences;
 
 // Default Wi-Fi credentials
-const char *defaultSSID = "OnePlus 10 Pro 5G";
-const char *defaultPassword = "A123456789";
+const char *defaultSSID = "nyx";
+const char *defaultPassword = "B1234567";
 
-// 30 seconds timeout for Wi-Fi connection
-unsigned long connectionTimeout = 5000;
+const char* baseSSID = "Trash-Net";           // Base SSID for cascading
+const char* apPassword = "password";          // Hotspot password
+const int maxClients = 3;                     // Limit connections to 3
+
+int hopLevel = 1;
+bool isWifi = true;
 
 // Supabase API information
 String API_URL = "https://bqpbvkwmgllnlufoszdd.supabase.co/rest/v1";
@@ -53,7 +63,6 @@ Adafruit_VL53L0X lox3 = Adafruit_VL53L0X();
 #define LOX2_ADDRESS 0x31
 #define LOX3_ADDRESS 0x32
 
-
 // Define pin for Servo Motor
 #define SERVO1_PIN 27
 #define SERVO2_PIN 32
@@ -63,10 +72,26 @@ Adafruit_VL53L0X lox3 = Adafruit_VL53L0X();
 #define SDA_PIN 21
 #define SCL_PIN 22
 
+// Pin for relay
+#define RELAY_PIN 15 
+
 // Create a Servo object
 Servo servo1;
 Servo servo2;
 Servo servo3;
+
+const int analogPin = 34;
+const int THRESHOLD = 2630;
+const int switchPin = 25;
+
+// Temperature and Fan Pins and Setup
+#define DHTPIN 18        // GPIO connected to DHT11 data pin
+#define DHTTYPE DHT11    // DHT 11
+#define FAN_PIN 19
+#define PWM_FREQ 5000
+#define PWM_RESOLUTION 8
+
+DHT dht(DHTPIN, DHTTYPE);
 
 // Create the PN532 object
 Adafruit_PN532 nfc(SDA_PIN, SCL_PIN);
@@ -77,6 +102,16 @@ const uint8_t authorizedUIDLength = 4;
 // Global variables
 int upperLimit;
 int lowerLimit;
+
+bool justUnlock = false;
+
+// Structure to store time
+struct Time {
+    int hour;
+    int minute;
+    int second;
+    int microsecond;
+};
 
 // Function to measure distance from a VL53L0X sensor
 float getDistance(Adafruit_VL53L0X &lox) {
@@ -140,9 +175,146 @@ void setID() {
   }
 }
 
+// If cannot connect to WiFi, Scan for ESP32 connection
+void scanAndConnectToESP32() {
+  Serial.println("Scanning for ESP32 hotspots...");
+
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_STA);
+  delay(1000);
+  
+  int numNetworks = WiFi.scanNetworks();
+  Serial.print("Networks found: ");
+  Serial.println(numNetworks);
+
+  int bestHop = 100;
+  String bestSSID = "";
+
+  for (int i = 0; i < numNetworks; i++) {
+    String foundSSID = WiFi.SSID(i);
+    
+    String hopString = foundSSID.substring(strlen(baseSSID) + 1);
+    if (hopString.length() > 0 && isDigit(hopString[0])) {
+        int foundHop = hopString.toInt();
+        Serial.println(foundHop);
+        if (foundHop > 0 && foundHop < bestHop) {
+            bestHop = foundHop;
+            bestSSID = foundSSID;
+        }
+    }
+  }
+
+  if (bestSSID.length() > 0) {
+    Serial.println("Connecting to: " + bestSSID);
+    WiFi.begin(bestSSID.c_str(), apPassword);
+    delay(15000);
+    hopLevel = bestHop + 1;
+    if (WiFi.status() == WL_CONNECTED){
+      Serial.println("Connected");
+      isWifi = false;
+      return;
+    } else {
+      Serial.println("Connection Failed");
+      return;
+    }
+  }
+  Serial.println("No valid ESP32 networks found.");
+}
+
+// Check WiFi Connection Status
+void connectionCheck() {
+    if (WiFi.status() == WL_CONNECTED) {
+      return;
+    } else if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Connection Lost..");
+      Serial.println("Trash restarting");
+      delay(5000);
+      ESP.restart(); 
+    }
+  delay(20000);
+}
+
+// Starts Hotspot
+void startAP() {
+  if (WiFi.status() == WL_CONNECTED){ 
+    Serial.println("Starting AP");
+    IPAddress staIP = WiFi.localIP();
+    
+    int lastByte = isWifi ? 1 : staIP[3];
+
+    // Unique SSID
+    String newSSID = String(baseSSID) + "-" + String(hopLevel) + "-" + String(lastByte);
+
+    // Generate dynamic AP IP
+    IPAddress ap_ip(192, 168, hopLevel + 4, 4 * lastByte - 3);
+    IPAddress ap_mask(255, 255, 255, 0);
+    IPAddress ap_leaseStart(192, 168, hopLevel + 4, 4 * lastByte - 2);
+    IPAddress ap_dns(8, 8, 4, 4);
+
+    WiFi.AP.begin();
+    WiFi.AP.config(ap_ip, ap_ip, ap_mask, ap_leaseStart, ap_dns);
+    WiFi.AP.create(newSSID.c_str(), apPassword);
+
+    Serial.println("AP Started: " + newSSID);
+    Serial.print("AP IP: "); Serial.println(ap_ip);
+    Serial.print("DHCP Lease Start: "); Serial.println(ap_leaseStart);
+    WiFi.AP.enableNAPT(true);
+  } 
+  else {
+    Serial.println("Cannot Start AP Without WiFi");
+  }
+}
+
+//Connect to WiFi
+void initializeWiFi() {
+  preferences.begin("WiFiCreds", true);
+
+  // Fetch to local Storage
+  String savedSSID = preferences.getString("ssid", "");
+  String savedPassword = preferences.getString("password", "");
+
+  preferences.end();
+
+  Serial.print("Saved SSID and Password: ");
+  Serial.print(savedSSID);
+  Serial.println(savedPassword);
+
+  if (!savedSSID.isEmpty() || !savedPassword.isEmpty()) {
+    Serial.println("Using saved WiFi credentials...");
+    WiFi.begin(savedSSID, savedPassword);
+    delay(15000);
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("\nConnection Failed! Trying default credentials...");
+    WiFi.disconnect(true, true);
+    delay(1000);
+    
+    WiFi.begin(defaultSSID, defaultPassword);
+    
+    delay(15000);
+    
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("\nFailed to connect to default WiFi. Scanning for ESP32...");
+      scanAndConnectToESP32();
+    }
+  }
+  
+  startAP(); 
+}
+
+bool previousSwitchState = LOW;
+
 void setup() {
   // Initialize Serial Monitor
   Serial.begin(115200);
+  delay(1000);
+
+  // Turn on relay first
+  pinMode(RELAY_PIN, OUTPUT);
+  delay(1000);
+  digitalWrite(RELAY_PIN, HIGH);
+  Serial.println(F("Relay Turned On"));
 
   pinMode(XSHUT_PIN_1, OUTPUT);
   pinMode(XSHUT_PIN_2, OUTPUT);
@@ -168,7 +340,6 @@ void setup() {
 
   Serial.println(F("VL53L0X Both in reset mode...(pins are low)"));
   
-  
   Serial.println(F("VL53L0X Starting..."));
   setID();
 
@@ -177,85 +348,40 @@ void setup() {
   servo2.attach(SERVO2_PIN);
   servo3.attach(SERVO3_PIN);
 
+  if (!servo3.attach(SERVO3_PIN)) {
+    Serial.println("Failed to attach servo3!");
+  }
+  
+  // Close All Bins
+  servo1.write(0);
+  servo2.write(0);
+  servo3.write(0);
+
+  delay(5000);
+
+  // Opens All Bins
   servo1.write(180);
   servo2.write(180);
   servo3.write(180);
 
-  preferences.begin("WiFiCreds", true);
+  pinMode(switchPin, INPUT);
+  bool currentSwitchState = digitalRead(switchPin);
+  previousSwitchState = currentSwitchState;
+  
+  initializeWiFi();
 
-  // Fetch to local Storage
-  String savedSSID = preferences.getString("ssid", "");
-  String savedPassword = preferences.getString("password", "");
+  //Update Sleeping in tables
+  updateToServer(Trash1_red_id, "is_sleep", false, "bins");
+  updateToServer(Trash1_yellow_id, "is_sleep", false, "bins");
+  updateToServer(Trash1_green_id, "is_sleep", false, "bins");
 
-  preferences.end();
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+  delay(1000);
 
-  // Wi-Fi Connection attempt counter
-  int connectionAttempts = 0;
-  int defaultAttempts = 0;
-
-  // Wifi Connection
-  Serial.print("Connecting to ");
-  Serial.println(savedSSID);
-
-  unsigned long startAttemptTime = millis();
-
-  // Try to connect with the saved Credentials for 5 attempts
-  while (WiFi.status() != WL_CONNECTED && connectionAttempts < 5) {
-    WiFi.begin(savedSSID, savedPassword);
-    delay(500);
-    Serial.print(".");
-    
-    if (WiFi.status() == WL_CONNECTED) {
-      break;
-    }
-
-    if (millis() - startAttemptTime >= connectionTimeout) {
-      Serial.println("\nFailed to connect. Retrying...");
-      connectionAttempts++;
-      startAttemptTime = millis();
-      delay(1000);
-    }
-  }
-
-  if (WiFi.status() != WL_CONNECTED && connectionAttempts >= 5) {
-    Serial.println("\nMax connection attempts with saved credentials reached. Switching to default credentials.");
-
-    // Reset the connection attempt counter
-    connectionAttempts = 0;
-    startAttemptTime = millis();
-
-    // Try connecting with default credentials up to 3 attempts
-    while (WiFi.status() != WL_CONNECTED && defaultAttempts < 3) {
-      WiFi.begin(defaultSSID, defaultPassword);
-      delay(500);
-      Serial.print(".");
-      
-      if (WiFi.status() == WL_CONNECTED) {
-        break;
-      }
-
-      if (millis() - startAttemptTime >= connectionTimeout) {
-        Serial.println("\nFailed to connect with default credentials. Retrying...");
-        defaultAttempts++;
-        startAttemptTime = millis();
-        delay(1000);
-      }
-    }
-
-    // If still not connected after 3 attempts, restart the ESP32
-    if (WiFi.status() != WL_CONNECTED && defaultAttempts >= 3) {
-      Serial.println("\nFailed to connect to Wi-Fi after multiple attempts.");
-      Serial.println("Restarting...");
-
-      // Restart the ESP32
-      ESP.restart();
-    }
-  }
-
-  Serial.println("");
-  Serial.println("WiFi connected.");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
+  dht.begin();
+  Serial.println("Temperature Sensor Initialized");
+  ledcAttach(FAN_PIN, PWM_FREQ, PWM_RESOLUTION);
 
   // Initialize LCDs
   lcd1.init();
@@ -300,7 +426,7 @@ void setup() {
 // Function to Fetch a specific table from trash_bins table from DB
 String fetchHttpResponse(const String& filterKey, const String& filterValue, const String& column, const String& table) {
   if (WiFi.status() != WL_CONNECTED) {
-    reconnectWiFi();
+    connectionCheck();
   }
 
   HTTPClient http;
@@ -327,9 +453,7 @@ String fetchHttpResponse(const String& filterKey, const String& filterValue, con
 
 // Function to PATCH the fullness level to the DB
 bool updateToServer(const String& id, const String& column, int value, const String& table) {
-  if (WiFi.status() != WL_CONNECTED) {
-    reconnectWiFi();
-  }
+  connectionCheck();
 
   HTTPClient http;
 
@@ -362,9 +486,7 @@ bool updateToServer(const String& id, const String& column, int value, const Str
 
 // Create data to the server
 bool createToServer(const String& binId, int fillLevel, bool isFull, const String& table) {
-  if (WiFi.status() != WL_CONNECTED) {
-    reconnectWiFi();
-  }
+  connectionCheck();
 
   HTTPClient http;
 
@@ -398,7 +520,6 @@ bool createToServer(const String& binId, int fillLevel, bool isFull, const Strin
   }
 }
 
-
 // Function to destructure results from requests
 DynamicJsonDocument processResponse(const String& payload) {
   DynamicJsonDocument doc(1024);
@@ -415,10 +536,10 @@ DynamicJsonDocument processResponse(const String& payload) {
   return doc;
 }
 
-bool detectingFullness(const String& id) {
+bool detectingFullness(const String& id, bool &isLocked) {
   if (WiFi.status() == WL_CONNECTED) {
     // Specify the ID and columns to fetch
-    String columns = "is_locked,upper_limit,lower_limit,ssid,password";
+    String columns = "is_locked,upper_limit,lower_limit,ssid,password,time_on,time_off,current_bin_time";
 
     // Fetch the HTTP response for the specified ID and columns
     String response = fetchHttpResponse("id", id, columns, "bins");  // Assuming this fetches the HTTP response correctly
@@ -429,10 +550,27 @@ bool detectingFullness(const String& id) {
       if (doc[0].containsKey("is_locked") && doc[0].containsKey("upper_limit") && doc[0].containsKey("lower_limit")) {
         // Update global variables
         bool lockStatus = doc[0]["is_locked"]; 
-        upperLimit = doc[0]["upper_limit"];  // Assign integer value
-        lowerLimit = doc[0]["lower_limit"];  // Assign integer value
+        upperLimit = doc[0]["upper_limit"];
+        lowerLimit = doc[0]["lower_limit"];
 
-        if (doc[0]["ssid"] && doc[0]["password"]) {
+        if (lockStatus != isLocked) {
+          Serial.println("Just Unlocked");
+          justUnlock = true;
+        }
+        
+        // Get the sleep schedule
+        String timeOn = doc[0]["time_on"];
+        String timeOff = doc[0]["time_off"];
+        String currentTime = doc[0]["current_bin_time"];
+        
+        Serial.println("Time: " + timeOn + ", " + timeOff + ", " + currentTime);
+
+        checkSleep(currentTime, timeOn, timeOff);
+
+        String fetchedSsid = doc[0]["ssid"];
+        String fetchedPassword = doc[0]["password"];
+
+        if (fetchedSsid && fetchedPassword) {
           const char *ssid = doc[0]["ssid"];
           const char *password = doc[0]["password"];
 
@@ -442,12 +580,12 @@ bool detectingFullness(const String& id) {
           String storedSSID = preferences.getString("ssid", "");
           String storedPassword = preferences.getString("password", "");
 
-          if (ssid != storedSSID) {
+          if (String(ssid) != storedSSID) { {
             preferences.putString("ssid", ssid);
             Serial.println("New SSID Saved");
           }
 
-          if (password != storedPassword) {
+          if (String(password) != storedPassword) {
             preferences.putString("password", password);
             Serial.println("New Password Saved");
           }
@@ -473,9 +611,10 @@ bool detectingFullness(const String& id) {
     }
   } else {
     Serial.println("Error in WiFi connection");
-    reconnectWiFi();
+    connectionCheck();
   }
   return true;  // Default return value in case of error
+  }
 }
 
 // Function to find the RFID in the database
@@ -499,7 +638,7 @@ bool checkRFID(const String& rfid) {
     }
   } else {
     Serial.println("Error in WiFi connection.");
-    reconnectWiFi();
+    connectionCheck();
   }
 
   return false;  // Default return value when WiFi is not connected or no valid response
@@ -514,37 +653,41 @@ bool isLocked1 = false;
 bool isLocked2 = false;
 bool isLocked3 = false;
 
-bool justUnlock = false;
-
 unsigned long previousCheckTime = 0; // Last time trash bins were checked
-const unsigned long checkInterval = 45 * 60 * 1000;
+unsigned long previousCheckTime2 = 0;
+const unsigned long checkInterval = 8 * 60 * 1000;
+const unsigned long checkInterval2 = 1 * 60 * 1000;
 
 void loop() {
   unsigned long currentTime = millis();
 
-  if (isLocked1 && isLocked2 && isLocked3) {
-    Serial.println("All bins are locked. Stopping detection.");
-  } else {
-    if (currentTime - previousCheckTime >= checkInterval || previousCheckTime == 0 || justUnlock) {
-      previousCheckTime = currentTime; // Update the last check time
+  if (currentTime - previousCheckTime >= checkInterval || previousCheckTime == 0 || justUnlock) {
+    previousCheckTime = currentTime; // Update the last check time
 
-      Serial.println("Checking trash bins...");
-      checkTrashBin(Trash1_red_id, lox1, lcd1, servo1, fullCount1, isLocked1);
-      checkTrashBin(Trash1_yellow_id, lox2, lcd2, servo2, fullCount2, isLocked2);
-      checkTrashBin(Trash1_green_id, lox3, lcd3, servo3, fullCount3, isLocked3);
-      justUnlock = false;
-    }
+    Serial.println("Checking trash bins...");
+    checkTrashBin(Trash1_red_id, lox1, lcd1, servo1, fullCount1, isLocked1);
+    checkTrashBin(Trash1_yellow_id, lox2, lcd2, servo2, fullCount2, isLocked2);
+    checkTrashBin(Trash1_green_id, lox3, lcd3, servo3, fullCount3, isLocked3);
+
+    justUnlock = false;
   }
+  
+  if (currentTime - previousCheckTime2 >= checkInterval2) {
+    previousCheckTime2 = currentTime;
+    detectingFullness(Trash1_red_id, isLocked1);
+    detectingFullness(Trash1_yellow_id, isLocked2);
+    detectingFullness(Trash1_green_id, isLocked3);
+  }
+
+  checkSwitch();
   handleNFC();
+  controlFan();
 }
 
-
 void checkTrashBin(String trashId, Adafruit_VL53L0X &tofSensor, LiquidCrystal_I2C lcd, Servo &servo, int &fullCount, bool &isLocked) {
-  if (detectingFullness(trashId)) {
-    isLocked = false;
-
+  if (detectingFullness(trashId, isLocked)) {
     // Unlock the trash bin by rotating the servo
-    servo.write(180);
+    controlServo(servo, isLocked, true, trashId);
     delay(1000);
 
     // Get the distance from the ToF sensor
@@ -596,17 +739,15 @@ void checkTrashBin(String trashId, Adafruit_VL53L0X &tofSensor, LiquidCrystal_I2
     createToServer(trashId, percentage, false, "sensor_history");
 
   } else {
-    isLocked = true;
     lcd.setCursor(0, 2);
     lcd.print("LOCKED: NFC REQ.");
-    servo.write(0); // Lock the bin
+    controlServo(servo, isLocked, false, trashId);
     delay(1000);
     handleNFC();
   }
 
   delay(500); // Adjust for delay in each bin
 }
-
 
 void handleNFC() {
   uint8_t success;
@@ -652,9 +793,9 @@ void handleNFC() {
       fullCount2 = 0;
       fullCount3 = 0;
 
-      isLocked1 = 0;
-      isLocked2 = 0;
-      isLocked3 = 0;
+      isLocked1 = false;
+      isLocked2 = false;
+      isLocked3 = false;
 
       justUnlock = true;
 
@@ -676,30 +817,158 @@ void handleNFC() {
   }
 }
 
-void reconnectWiFi() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return; 
-  }
+// Function to parse time string "HH:MM:SS.MMMMMM"
+Time parseTime(String timeStr) {
+    Time t;
+    sscanf(timeStr.c_str(), "%d:%d:%d.%d", &t.hour, &t.minute, &t.second, &t.microsecond);
+    return t;
+}
 
-  int attemptCount = 0;
+// Function to convert Time struct to total microseconds
+uint64_t timeToMicroseconds(Time t) {
+    return ((uint64_t)t.hour * 3600 + t.minute * 60 + t.second) * 1000000 + t.microsecond;
+}
 
-  // Try to reconnect up to 5 times
-  while (WiFi.status() != WL_CONNECTED && attemptCount < 5) {
-    WiFi.reconnect();
-    delay(5000);
-    attemptCount++;
-    Serial.print("Attempt ");
-    Serial.print(attemptCount);
-    Serial.println(" of 5");
-  }
+// Checks time and sleep
+void checkSleep(String currentTime, String timeOn, String timeOff) {
+    uint64_t sleepDuration = calculateSleepDuration(currentTime, timeOn, timeOff);
+    
+    if (sleepDuration > 0) {
+        Serial.println("Sleeping time");
+        // Opens All Bins
+        controlServo(servo1, isLocked1, true, Trash1_red_id);
+        controlServo(servo2, isLocked2, true, Trash1_yellow_id);
+        controlServo(servo3, isLocked3, true, Trash1_green_id);
+        delay(2000);
 
-  // If still not connected after 5 attempts, restart the ESP32
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Failed to reconnect after 5 attempts. Restarting...");
-    ESP.restart();
+        //Update Sleeping in tables
+        updateToServer(Trash1_red_id, "is_sleep", true, "bins");
+        updateToServer(Trash1_yellow_id, "is_sleep", true, "bins");
+        updateToServer(Trash1_green_id, "is_sleep", true, "bins");
+        
+        digitalWrite(RELAY_PIN, LOW);
+        gpio_hold_en((gpio_num_t)RELAY_PIN);
+        delay(5000);
+
+        Serial.printf("Sleeping for %.2f seconds...\n", sleepDuration / 1000000.0);
+        esp_sleep_enable_timer_wakeup(sleepDuration);
+        esp_deep_sleep_start();
+    } else {
+        Serial.println("Device is within operating time");
+    }
+}
+
+// Function to calculate sleep duration
+uint64_t calculateSleepDuration(String currentTimeStr, String timeOnStr, String timeOffStr) {
+    Time currentTime = parseTime(currentTimeStr);
+    Time timeOn = parseTime(timeOnStr);
+    Time timeOff = parseTime(timeOffStr);
+    
+    uint64_t currentMicro = timeToMicroseconds(currentTime);
+    uint64_t onMicro = timeToMicroseconds(timeOn);
+    uint64_t offMicro = timeToMicroseconds(timeOff);
+    
+    if (offMicro < onMicro) {
+        offMicro += 86400000000ULL;
+    }
+
+    if (currentMicro < onMicro) {
+        return onMicro - currentMicro;
+    }
+
+    else if (currentMicro >= offMicro) {
+        return (86400000000ULL - currentMicro) + onMicro;
+    }
+    else {
+        return 0;
+    }
+}
+
+void controlServo(Servo &servo, bool &isLocked, bool commandToOpen, const String& id) {
+  int adcValue = analogRead(analogPin);
+  Serial.print("ADC Value: ");
+  Serial.println(adcValue);
+
+  if (adcValue <= THRESHOLD) {
+    // Force open ALL servos if ADC is low
+    if (isLocked1) {
+      servo1.write(180);
+      isLocked1 = false;
+      updateToServer(Trash1_red_id, "is_locked", false, "bins");
+      Serial.println("ADC low - Forcing servo1 open.");
+    }
+    if (isLocked2) {
+      servo2.write(180);
+      isLocked2 = false;
+      updateToServer(Trash1_yellow_id, "is_locked", false, "bins");
+      Serial.println("ADC low - Forcing servo2 open.");
+    }
+    if (isLocked3) {
+      servo3.write(180);
+      isLocked3 = false;
+      updateToServer(Trash1_green_id, "is_locked", false, "bins");
+      Serial.println("ADC low - Forcing servo3 open.");
+    }
   } else {
-    Serial.println("Reconnected to WiFi!");
+    // ADC is above threshold – allow manual control
+    if (commandToOpen && isLocked) {
+      servo.write(180);  // Open
+      isLocked = false;
+      updateToServer(id, "is_locked", false, "bins");
+      Serial.println("Opened servo.");
+    } else if (!commandToOpen && !isLocked) {
+      servo.write(0);    // Close
+      isLocked = true;
+      updateToServer(id, "is_locked", true, "bins");
+      Serial.println("Closed servo.");
+    }
   }
+}
+
+void checkSwitch() {
+  bool currentSwitchState = digitalRead(switchPin);
+  if (currentSwitchState != previousSwitchState) {
+    // Switch has changed state - open all servos
+    Serial.println("Manual switch toggled - opening all servos.");
+    servo1.write(180);
+    servo2.write(180);
+    servo3.write(180);
+    isLocked1 = false;
+    isLocked2 = false;
+    isLocked3 = false;
+    justUnlock = true;
+    previousSwitchState = currentSwitchState;
+    updateToServer(Trash1_red_id, "is_locked", false, "bins");
+    updateToServer(Trash1_yellow_id, "is_locked", false, "bins");
+    updateToServer(Trash1_green_id, "is_locked", false, "bins");
+    return;
+  }
+}
+
+void controlFan() {
+  float tempC = dht.readTemperature(); // Read temperature in Celsius
+
+  if (isnan(tempC)) {
+    Serial.println("Failed to read from DHT sensor!");
+    return;
+  }
+
+  Serial.print("Temperature: ");
+  Serial.print(tempC);
+  Serial.println("°C");
+
+  int duty;
+
+  if (tempC < 40) {
+    duty = 0; // Fan off if temperature is below 40°C
+  } else {
+    // Map temperature from 40°C upwards to the duty cycle range (130 to 255)
+    duty = map(constrain(tempC, 40, 60), 40, 60, 130, 255);
+  }
+  Serial.print(duty);
+  ledcWrite(FAN_PIN, duty);
+
+  delay(1000); // Wait a second before reading again
 }
 
 
