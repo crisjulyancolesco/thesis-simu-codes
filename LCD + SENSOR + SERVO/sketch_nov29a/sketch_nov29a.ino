@@ -54,14 +54,14 @@ Adafruit_VL53L0X lox2 = Adafruit_VL53L0X();
 Adafruit_VL53L0X lox3 = Adafruit_VL53L0X();
 
 // X Shut Pins
-#define XSHUT_PIN_1 12
-#define XSHUT_PIN_2 13
-#define XSHUT_PIN_3 16  
+#define XSHUT_PIN_1 13
+#define XSHUT_PIN_2 16
+#define XSHUT_PIN_3 12
 
 // Address of ToF
-#define LOX1_ADDRESS 0x30
-#define LOX2_ADDRESS 0x31
-#define LOX3_ADDRESS 0x32
+#define LOX1_ADDRESS 0x31
+#define LOX2_ADDRESS 0x32
+#define LOX3_ADDRESS 0x30
 
 // Define pin for Servo Motor
 #define SERVO1_PIN 27
@@ -677,11 +677,11 @@ void loop() {
     detectingFullness(Trash1_red_id, isLocked1);
     detectingFullness(Trash1_yellow_id, isLocked2);
     detectingFullness(Trash1_green_id, isLocked3);
+    controlFan();
   }
 
   checkSwitch();
   handleNFC();
-  controlFan();
 }
 
 void checkTrashBin(String trashId, Adafruit_VL53L0X &tofSensor, LiquidCrystal_I2C lcd, Servo &servo, int &fullCount, bool &isLocked) {
@@ -784,6 +784,11 @@ void handleNFC() {
       lcd3.setCursor(0, 2);
       lcd3.clear();
       lcd3.print("UNLOCKED");
+
+      // Open
+      servo1.write(180);
+      servo2.write(180);
+      servo3.write(180);
       
       updateToServer(Trash1_red_id, "is_locked", false, "bins");
       updateToServer(Trash1_yellow_id, "is_locked", false, "bins");
@@ -933,11 +938,19 @@ void checkSwitch() {
     servo1.write(180);
     servo2.write(180);
     servo3.write(180);
+
     isLocked1 = false;
     isLocked2 = false;
     isLocked3 = false;
+
+    fullCount1 = 0;
+    fullCount2 = 0;
+    fullCount3 = 0;
+
     justUnlock = true;
+
     previousSwitchState = currentSwitchState;
+    
     updateToServer(Trash1_red_id, "is_locked", false, "bins");
     updateToServer(Trash1_yellow_id, "is_locked", false, "bins");
     updateToServer(Trash1_green_id, "is_locked", false, "bins");
@@ -963,7 +976,7 @@ void controlFan() {
     duty = 0; // Fan off if temperature is below 40°C
   } else {
     // Map temperature from 40°C upwards to the duty cycle range (130 to 255)
-    duty = map(constrain(tempC, 40, 60), 40, 60, 130, 255);
+    duty = map(constrain(tempC, 40, 55), 40, 55, 130, 255);
   }
   Serial.print(duty);
   ledcWrite(FAN_PIN, duty);
