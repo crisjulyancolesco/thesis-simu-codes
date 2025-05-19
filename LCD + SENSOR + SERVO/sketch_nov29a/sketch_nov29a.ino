@@ -654,9 +654,7 @@ bool isLocked2 = false;
 bool isLocked3 = false;
 
 unsigned long previousCheckTime = 0; // Last time trash bins were checked
-unsigned long previousCheckTime2 = 0;
-const unsigned long checkInterval = 8 * 60 * 1000;
-const unsigned long checkInterval2 = 1 * 60 * 1000;
+const unsigned long checkInterval = 30 * 1000;
 
 void loop() {
   unsigned long currentTime = millis();
@@ -670,13 +668,6 @@ void loop() {
     checkTrashBin(Trash1_green_id, lox3, lcd3, servo3, fullCount3, isLocked3);
 
     justUnlock = false;
-  }
-  
-  if (currentTime - previousCheckTime2 >= checkInterval2) {
-    previousCheckTime2 = currentTime;
-    detectingFullness(Trash1_red_id, isLocked1);
-    detectingFullness(Trash1_yellow_id, isLocked2);
-    detectingFullness(Trash1_green_id, isLocked3);
     controlFan();
   }
 
@@ -816,6 +807,8 @@ void handleNFC() {
       lcd3.setCursor(0, 2);
       lcd3.clear();
       lcd3.print("Unauthorized UID.");
+
+      justUnlock = true;
     }
   } else {
     return;
